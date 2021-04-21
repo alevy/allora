@@ -2,10 +2,11 @@
 .extern LD_STACK_PTR
 
 .section ".text.boot"
-
 _start:
 	/* Get device tree. It's either passed in x0, or at the beginning of memory
 	 */
+	adr x1, .
+	mrs x2, TTBR0_EL1
 	cmp x0,  #0
 	mov x0, #0x40000000
 

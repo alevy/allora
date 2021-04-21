@@ -9,9 +9,5 @@ edition = "2018"
 [profile.release]
 debug = true
 
-[dependencies.fdt-rs]
-version = "*"
-default-features = false
-
 [build-dependencies]
 cc = "1.0.25"

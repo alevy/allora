@@ -1,31 +1,9 @@
 use core::fmt;
+use core::iter::Iterator;
 
-#[derive(Copy, Clone)]
-pub struct BE(u32);
+use crate::utils::*;
 
-impl BE {
-    pub fn native(self) -> u32 {
-        u32::from_be(self.0)
-    }
-}
-
-impl fmt::Display for BE {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.native())
-    }
-}
-
-impl fmt::Debug for BE {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self.native())
-    }
-}
-
-impl fmt::LowerHex for BE {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:#x}", self.native())
-    }
-}
+type BE = Endian<u32, Big>;
 
 #[repr(C)]
 pub struct DeviceTree {
@@ -89,14 +67,13 @@ impl DeviceTree {
     pub fn root(&self) -> Option<Node> {
         self.nodes().next()
     }
-
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct PropHeader {
-   len: BE,
-   nameoff: BE,
+    len: BE,
+    nameoff: BE,
 }
 
 #[derive(Debug)]
@@ -119,7 +96,7 @@ impl<'a> Iterator for PropIterator<'a> {
                 let val = (*self.struct_base).native();
                 self.struct_base = self.struct_base.offset(1);
                 match val {
-                    0x4 => {},
+                    0x4 => {}
                     0x1 => return None,
                     0x2 => return None,
                     0x9 => return None,
@@ -143,7 +120,10 @@ impl<'a> Iterator for PropIterator<'a> {
                         };
 
                         let fullp = Prop {
-                            value: core::slice::from_raw_parts(val_base, prop.len.native() as usize),
+                            value: core::slice::from_raw_parts(
+                                val_base,
+                                prop.len.native() as usize,
+                            ),
                             name: core::slice::from_raw_parts(string_base, string_len),
                         };
                         return Some(fullp);
@@ -155,7 +135,7 @@ impl<'a> Iterator for PropIterator<'a> {
     }
 }
 
-#[derive(Copy,Clone,Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct Node<'a> {
     strings_base: *const u8,
     base: *const BE,
@@ -187,19 +167,35 @@ impl<'a> Node<'a> {
         }
     }
 
-    pub fn child_by_name(&self, name: &str) -> Option<Node> {
-        let name = name.as_bytes();
-        self.children().find(|node| {
-            node.name == name
+    pub fn children_by_prop<F>(&self, name: &'static str, matches: F) -> impl Iterator<Item = Node>
+    where
+        F: Fn(&Prop) -> bool,
+    {
+        self.children().filter(move |child| {
+            if let Some(prop) = child.prop_by_name(name) {
+                matches(&prop)
+            } else {
+                false
+            }
         })
     }
 
-    fn child_by_path_helper<'b, I: Iterator<Item = &'b [u8]>>(self, mut path: I) -> Option<Node<'a>> {
-        path.next().and_then(|cur|
-            self.children().find(|node| node.name == cur).and_then(|next|
-               next.child_by_path_helper(path)
-            )
-        ).or(Some(self))
+    pub fn child_by_name(&self, name: &str) -> Option<Node> {
+        let name = name.as_bytes();
+        self.children().find(|node| node.name == name)
+    }
+
+    fn child_by_path_helper<'b, I: Iterator<Item = &'b [u8]>>(
+        self,
+        mut path: I,
+    ) -> Option<Node<'a>> {
+        path.next()
+            .and_then(|cur| {
+                self.children()
+                    .find(|node| node.name == cur)
+                    .and_then(|next| next.child_by_path_helper(path))
+            })
+            .or(Some(self))
     }
 
     pub fn child_by_path<B: 'a + AsRef<[u8]>>(self, name: B) -> Option<Node<'a>> {
@@ -247,27 +243,34 @@ impl<'a> Iterator for NodeIterator<'a> {
                         self.search_depth += 1;
                         if self.search_depth == 1 {
                             let depth = self.depth + 1;
-                            return Some(Node { base: self.struct_base, name, strings_base: self.strings_base, depth });
+                            return Some(Node {
+                                base: self.struct_base,
+                                name,
+                                strings_base: self.strings_base,
+                                depth,
+                            });
                         }
-                    },
+                    }
                     0x2 => {
                         /* End node */
                         if self.search_depth == 0 {
-                            return None
+                            return None;
                         }
                         self.search_depth -= 1;
-                    },
+                    }
                     0x3 => {
                         /* Property */
                         let prop = &*(self.struct_base as *const PropHeader);
                         self.struct_base = {
                             let len = prop.len.native() as usize;
-                            let mut ptr = (self.struct_base as usize) + core::mem::size_of::<PropHeader>() + len;
+                            let mut ptr = (self.struct_base as usize)
+                                + core::mem::size_of::<PropHeader>()
+                                + len;
                             ptr = (ptr + 4 - 1) & !3;
                             ptr as *const BE
                         };
                     }
-                    0x4 => {}, // NOP
+                    0x4 => {} // NOP
                     e => panic!("fdt field {:#x} @{:?}", e, self.struct_base.offset(-1)),
                 }
             }
