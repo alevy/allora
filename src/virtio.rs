@@ -387,7 +387,7 @@ impl<'a> VirtIOEntropy<'a> {
             mb();
             write_volatile(&mut self.regs.queue_notify, 0.into());
             mb();
-            while read_volatile(&self.used.idx).native() != read_volatile(&self.avail.idx).native() {}
+            while read_volatile(&self.used.idx).native() != read_volatile(&self.avail.idx).native() { }
         }
     }
 }

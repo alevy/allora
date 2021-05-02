@@ -12,7 +12,7 @@ impl UART {
     pub fn write_byte(&mut self, byte: u8) {
         unsafe {
             ptr::write_volatile(self.0, byte as u32);
-            while ptr::read_volatile(self.0.offset(0x18 / 4)) & 1 << 3 != 0 {}
+            while ptr::read_volatile(self.0.offset(0x18 / 4)) & 1 << 3 != 0 { }
         }
     }
 
@@ -26,7 +26,7 @@ impl UART {
     pub fn read_byte(&mut self) -> u8 {
         unsafe {
             ptr::write_volatile(self.0.offset(0x38 / 4), 1 << 4);
-            while ptr::read_volatile(self.0.offset(0x18 / 4)) & (1 << 4) != 0 {}
+            while ptr::read_volatile(self.0.offset(0x18 / 4)) & (1 << 4) != 0 { }
             ptr::read_volatile(self.0) as u8
         }
     }
