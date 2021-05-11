@@ -6,6 +6,7 @@ pub mod device_tree;
 pub mod utils;
 pub mod virtio;
 pub mod uart;
+pub mod gic;
 
 mod apps;
 
@@ -38,6 +39,8 @@ fn regs_to_usize(regs: &[u8], cell_size: usize) -> (usize, &[u8]) {
 
 #[no_mangle]
 pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
+    gic::init();
+
     let mut uart = None;
     if let Some(root) = dtb.root() {
         let size_cell = root
@@ -68,7 +71,7 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
                             let (addr, rest) = regs_to_usize(reg.value, address_cell);
                             let (size, _) = regs_to_usize(rest, size_cell);
                             if size == 0x1000 {
-                                uart = Some(unsafe { uart::UART::new(addr as _) });
+                                uart = Some(unsafe { uart::UART::new(addr as _, uart::IRQ) });
                             }
                         }
                     });
@@ -120,7 +123,12 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
 
 #[panic_handler]
 fn panic(panic_info: &PanicInfo<'_>) -> ! {
-    let mut uart = unsafe { uart::UART::new(0x0900_0000 as _) };
-    let _ = write!(uart, "Panic occurred: {}\n", panic_info);
-    loop {}
+    let mut uart = unsafe { uart::UART::new(0x0900_0000 as _, uart::IRQ) };
+    let _ = uart.write_fmt(format_args!("{}", panic_info));
+    extern {
+        fn system_off() -> !;
+    }
+    unsafe {
+        system_off()
+    }
 }

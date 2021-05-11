@@ -2,17 +2,25 @@ use core::fmt::Write;
 use core::ptr;
 use core::str;
 
-pub struct UART(*mut u32);
+pub struct UART(*mut u32, u32);
+
+pub const IRQ: u32 = 0x21;
 
 impl UART {
-    pub const unsafe fn new(base_addr: *mut u32) -> UART {
-        UART(base_addr)
+    pub const unsafe fn new(base_addr: *mut u32, irq: u32) -> UART {
+        UART(base_addr, irq)
     }
 
     pub fn write_byte(&mut self, byte: u8) {
         unsafe {
             ptr::write_volatile(self.0, byte as u32);
-            while ptr::read_volatile(self.0.offset(0x18 / 4)) & 1 << 3 != 0 { }
+            ptr::write_volatile(self.0.offset(0x38 / 4), 1 << 3);
+            crate::gic::enable(self.1);
+            while ptr::read_volatile(self.0.offset(0x18 / 4)) & 1 << 3 != 0 {
+                asm!("wfi");
+                crate::gic::clear(self.1);
+            }
+            crate::gic::disable(self.1);
         }
     }
 
@@ -26,7 +34,12 @@ impl UART {
     pub fn read_byte(&mut self) -> u8 {
         unsafe {
             ptr::write_volatile(self.0.offset(0x38 / 4), 1 << 4);
-            while ptr::read_volatile(self.0.offset(0x18 / 4)) & (1 << 4) != 0 { }
+            crate::gic::enable(self.1);
+            while ptr::read_volatile(self.0.offset(0x18 / 4)) & (1 << 4) != 0 {
+                asm!("wfi");
+                crate::gic::clear(self.1);
+            }
+            crate::gic::disable(self.1);
             ptr::read_volatile(self.0) as u8
         }
     }
