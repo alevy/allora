@@ -22,7 +22,9 @@ let
   rust_targets = [
     "aarch64-unknown-none"
   ];
-  rust_build = (nixpkgs.rustChannelOfTargets rust_channel rust_date rust_targets).override { extensions = [ "rust-src" ];};
+  rust_build = (nixpkgs.rustChannelOfTargets rust_channel rust_date rust_targets).override {
+    extensions = [ "rust-src" "llvm-tools-preview" ];
+  };
 in
   with pkgs;
   stdenv.mkDerivation {
