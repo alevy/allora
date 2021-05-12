@@ -58,7 +58,7 @@ pub fn enable(interrupt: u32) {
     unsafe {
         ptr::write_volatile(
             GICD_ISENABLER.add((interrupt / GICD_ISENABLER_SIZE) as usize),
-            1 << (interrupt % GICD_ISENABLER_SIZE)
+            1 << (interrupt % GICD_ISENABLER_SIZE),
         );
     }
 }
@@ -67,7 +67,7 @@ pub fn disable(interrupt: u32) {
     unsafe {
         ptr::write_volatile(
             GICD_ICENABLER.add((interrupt / GICD_ISENABLER_SIZE) as usize),
-            1 << (interrupt % GICD_ISENABLER_SIZE)
+            1 << (interrupt % GICD_ISENABLER_SIZE),
         );
     }
 }
@@ -76,7 +76,7 @@ pub fn clear(interrupt: u32) {
     unsafe {
         ptr::write_volatile(
             GICD_ICPENDR.add((interrupt / GICD_ICPENDR_SIZE) as usize),
-            1 << (interrupt % GICD_ICPENDR_SIZE)
+            1 << (interrupt % GICD_ICPENDR_SIZE),
         );
     }
 }
@@ -114,3 +114,22 @@ pub fn set_config(interrupt: u32, config: u32) {
     }
 }
 
+pub struct GIC(u32);
+
+impl GIC {
+    pub unsafe fn new(exception_num: u32) -> GIC {
+        GIC(exception_num)
+    }
+
+    pub fn enable(&self) {
+        enable(self.0)
+    }
+
+    pub fn disable(&self) {
+        disable(self.0)
+    }
+
+    pub fn clear(&self) {
+        clear(self.0)
+    }
+}

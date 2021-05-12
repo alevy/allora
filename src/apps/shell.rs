@@ -18,9 +18,17 @@ impl<'a, 'b> App<'a, 'b> {
         let _ = write!(self.uart, "Random: {:?}\n", &data);
     }
 
-    fn write_random(&mut self, words: &mut dyn Iterator<Item=&[u8]>) {
-        let mut sector = words.next().and_then(|sec| from_utf8(sec).ok()).and_then(|sec| sec.parse::<u64>().ok()).unwrap_or(0);
-        let mut len = words.next().and_then(|len| from_utf8(len).ok()).and_then(|len| len.parse::<usize>().ok()).unwrap_or(0);
+    fn write_random(&mut self, words: &mut dyn Iterator<Item = &[u8]>) {
+        let mut sector = words
+            .next()
+            .and_then(|sec| from_utf8(sec).ok())
+            .and_then(|sec| sec.parse::<u64>().ok())
+            .unwrap_or(0);
+        let mut len = words
+            .next()
+            .and_then(|len| from_utf8(len).ok())
+            .and_then(|len| len.parse::<usize>().ok())
+            .unwrap_or(0);
         while len > 0 {
             let mut outdata: [u8; 512] = [0; 512];
             let curlen = core::cmp::min(512, len);
@@ -37,9 +45,17 @@ impl<'a, 'b> App<'a, 'b> {
         }
     }
 
-    fn read(&mut self, words: &mut dyn Iterator<Item=&[u8]>) {
-        let sector = words.next().and_then(|sec| from_utf8(sec).ok()).and_then(|sec| sec.parse::<u64>().ok()).unwrap_or(0);
-        let mut len = words.next().and_then(|len| from_utf8(len).ok()).and_then(|len| len.parse::<usize>().ok()).unwrap_or(512);
+    fn read(&mut self, words: &mut dyn Iterator<Item = &[u8]>) {
+        let sector = words
+            .next()
+            .and_then(|sec| from_utf8(sec).ok())
+            .and_then(|sec| sec.parse::<u64>().ok())
+            .unwrap_or(0);
+        let mut len = words
+            .next()
+            .and_then(|len| from_utf8(len).ok())
+            .and_then(|len| len.parse::<usize>().ok())
+            .unwrap_or(512);
         let mut data: [u8; 512] = [0; 512];
         loop {
             self.blk.read(sector, &mut data);
@@ -54,10 +70,17 @@ impl<'a, 'b> App<'a, 'b> {
         }
     }
 
-
-    fn write(&mut self, words: &mut dyn Iterator<Item=&[u8]>) {
-        let mut sector = words.next().and_then(|sec| from_utf8(sec).ok()).and_then(|sec| sec.parse::<u64>().ok()).unwrap_or(0);
-        let mut len = words.next().and_then(|len| from_utf8(len).ok()).and_then(|len| len.parse::<usize>().ok()).unwrap_or(0);
+    fn write(&mut self, words: &mut dyn Iterator<Item = &[u8]>) {
+        let mut sector = words
+            .next()
+            .and_then(|sec| from_utf8(sec).ok())
+            .and_then(|sec| sec.parse::<u64>().ok())
+            .unwrap_or(0);
+        let mut len = words
+            .next()
+            .and_then(|len| from_utf8(len).ok())
+            .and_then(|len| len.parse::<usize>().ok())
+            .unwrap_or(0);
         while len > 0 {
             let mut outdata: [u8; 512] = [0; 512];
             let curlen = core::cmp::min(512, len);
@@ -77,7 +100,6 @@ impl<'a, 'b> App<'a, 'b> {
         }
     }
 
-
     pub fn main(&mut self) {
         loop {
             let _ = write!(self.uart, "$> ");
@@ -87,24 +109,27 @@ impl<'a, 'b> App<'a, 'b> {
             match words.next() {
                 Some(b"rand") => {
                     self.get_random();
-                },
+                }
                 Some(b"writerand") => {
                     self.write_random(&mut words);
-                },
+                }
                 Some(b"read") => {
                     self.read(&mut words);
-                },
+                }
                 Some(b"write") => {
                     self.write(&mut words);
-                },
+                }
                 Some(b"exit") => {
                     break;
-                },
+                }
                 _ => {
-                    let _ = write!(self.uart, "Unknown command \"{}\"\n", from_utf8(line).unwrap_or("unknown"));
+                    let _ = write!(
+                        self.uart,
+                        "Unknown command \"{}\"\n",
+                        from_utf8(line).unwrap_or("unknown")
+                    );
                 }
             }
         }
     }
 }
-

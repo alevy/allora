@@ -2,25 +2,29 @@ use core::fmt::Write;
 use core::ptr;
 use core::str;
 
-pub struct UART(*mut u32, u32);
+use crate::gic::GIC;
+
+pub struct UART(*mut u32, GIC);
 
 pub const IRQ: u32 = 0x21;
 
 impl UART {
-    pub const unsafe fn new(base_addr: *mut u32, irq: u32) -> UART {
+    pub const unsafe fn new(base_addr: *mut u32, irq: GIC) -> UART {
         UART(base_addr, irq)
     }
 
     pub fn write_byte(&mut self, byte: u8) {
         unsafe {
             ptr::write_volatile(self.0, byte as u32);
-            ptr::write_volatile(self.0.offset(0x38 / 4), 1 << 3);
-            crate::gic::enable(self.1);
+            let orig_mask = ptr::read(self.0.offset(0x38 / 4));
+            ptr::write_volatile(self.0.offset(0x38 / 4), orig_mask | (1 << 3));
+            self.1.enable();
             while ptr::read_volatile(self.0.offset(0x18 / 4)) & 1 << 3 != 0 {
                 asm!("wfi");
-                crate::gic::clear(self.1);
+                self.1.clear();
             }
-            crate::gic::disable(self.1);
+            self.1.disable();
+            ptr::write_volatile(self.0.offset(0x38 / 4), orig_mask);
         }
     }
 
@@ -30,16 +34,17 @@ impl UART {
         }
     }
 
-    #[inline(never)]
     pub fn read_byte(&mut self) -> u8 {
         unsafe {
-            ptr::write_volatile(self.0.offset(0x38 / 4), 1 << 4);
-            crate::gic::enable(self.1);
+            let orig_mask = ptr::read(self.0.offset(0x38 / 4));
+            ptr::write_volatile(self.0.offset(0x38 / 4), orig_mask | (1 << 4));
+            self.1.enable();
             while ptr::read_volatile(self.0.offset(0x18 / 4)) & (1 << 4) != 0 {
                 asm!("wfi");
-                crate::gic::clear(self.1);
+                self.1.clear();
             }
-            crate::gic::disable(self.1);
+            self.1.disable();
+            ptr::write_volatile(self.0.offset(0x38 / 4), orig_mask);
             ptr::read_volatile(self.0) as u8
         }
     }
@@ -72,4 +77,3 @@ impl Write for UART {
         Ok(())
     }
 }
-

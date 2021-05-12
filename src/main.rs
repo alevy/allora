@@ -3,20 +3,20 @@
 #![feature(asm, global_asm)]
 
 pub mod device_tree;
+pub mod gic;
+pub mod uart;
 pub mod utils;
 pub mod virtio;
-pub mod uart;
-pub mod gic;
 
 mod apps;
 
-use virtio::{VirtIORegs, VirtIODevice};
+use virtio::{VirtIODevice, VirtIORegs};
 
 #[cfg(target_arch = "aarch64")]
 global_asm!(include_str!("boot.S"));
 
-use core::panic::PanicInfo;
 use core::fmt::Write;
+use core::panic::PanicInfo;
 
 fn null_terminated_str(bytes: &[u8]) -> &[u8] {
     if bytes[bytes.len() - 1] == 0 {
@@ -35,6 +35,20 @@ fn regs_to_usize(regs: &[u8], cell_size: usize) -> (usize, &[u8]) {
         result = result << 32 | (u32::from_be_bytes(c) as usize);
     }
     (result, rest)
+}
+
+fn interrupt_for_node(node: &device_tree::Node) -> Option<u32> {
+    node.prop_by_name("interrupts").map(|interrupt| {
+        let (irq_type, rest) = regs_to_usize(interrupt.value, 1);
+        let (irq, _rest) = regs_to_usize(rest, 1);
+        if irq_type == 0 {
+            // IRQ
+            32 + (irq as u32)
+        } else {
+            // irq_type == 1, SPI
+            16 + (irq as u32)
+        }
+    })
 }
 
 #[no_mangle]
@@ -67,11 +81,13 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
                 .filter(|stdout_path| stdout_path == b"/pl011@9000000")
                 .map(|stdout_path| {
                     root.child_by_path(stdout_path).map(|stdout| {
+                        let irq = interrupt_for_node(&stdout).unwrap_or(0) as u32;
                         if let Some(reg) = stdout.prop_by_name("reg") {
                             let (addr, rest) = regs_to_usize(reg.value, address_cell);
                             let (size, _) = regs_to_usize(rest, size_cell);
                             if size == 0x1000 {
-                                uart = Some(unsafe { uart::UART::new(addr as _, uart::IRQ) });
+                                uart =
+                                    Some(unsafe { uart::UART::new(addr as _, gic::GIC::new(irq)) });
                             }
                         }
                     });
@@ -94,26 +110,37 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
             {
                 if let Some(reg) = child.prop_by_name("reg") {
                     let (addr, _rest) = regs_to_usize(reg.value, address_cell);
+                    let irq = unsafe {
+                        crate::gic::GIC::new(interrupt_for_node(&child).unwrap_or(0) as u32)
+                    };
                     if let Some(virtio) = unsafe { VirtIORegs::new(addr as *mut VirtIORegs) } {
                         match virtio.device_id() {
                             virtio::DeviceId::Blk => {
-                                virtio_blk = virtio::VirtIOBlk::init(virtio, &mut blk_desc, &mut blk_avail, &mut blk_used);
-                            },
+                                virtio_blk = virtio::VirtIOBlk::init(
+                                    virtio,
+                                    &mut blk_desc,
+                                    &mut blk_avail,
+                                    &mut blk_used,
+                                    irq,
+                                );
+                            }
                             virtio::DeviceId::Entropy => {
-                                virtio_entropy = virtio::VirtIOEntropy::init(virtio, &mut entropy_desc, &mut entropy_avail, &mut entropy_used);
-                            },
-                            _ => {},
+                                virtio_entropy = virtio::VirtIOEntropy::init(
+                                    virtio,
+                                    &mut entropy_desc,
+                                    &mut entropy_avail,
+                                    &mut entropy_used,
+                                    irq,
+                                );
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
             virtio_blk.map(|blk| {
                 virtio_entropy.map(|entropy| {
-                    let mut shell = apps::shell::App {
-                        uart,
-                        blk,
-                        entropy,
-                    };
+                    let mut shell = apps::shell::App { uart, blk, entropy };
                     shell.main();
                 });
             });
@@ -123,12 +150,10 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
 
 #[panic_handler]
 fn panic(panic_info: &PanicInfo<'_>) -> ! {
-    let mut uart = unsafe { uart::UART::new(0x0900_0000 as _, uart::IRQ) };
+    let mut uart = unsafe { uart::UART::new(0x0900_0000 as _, gic::GIC::new(uart::IRQ)) };
     let _ = uart.write_fmt(format_args!("{}", panic_info));
-    extern {
+    extern "C" {
         fn system_off() -> !;
     }
-    unsafe {
-        system_off()
-    }
+    unsafe { system_off() }
 }
