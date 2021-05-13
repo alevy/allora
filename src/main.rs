@@ -10,7 +10,7 @@ pub mod virtio;
 
 mod apps;
 
-use virtio::{VirtIODevice, VirtIORegs};
+use virtio::VirtIORegs;
 
 #[cfg(target_arch = "aarch64")]
 global_asm!(include_str!("boot.S"));
@@ -106,6 +106,14 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
             let mut entropy_avail = virtio::VirtqAvailable::empty();
             let mut entropy_used = virtio::VirtQUsed::empty();
 
+            let mut virtio_net: Option<virtio::VirtIONet> = None;
+            let mut net_desc = [virtio::VirtQDesc::empty(); 128];
+            let mut net_avail = virtio::VirtqAvailable::empty();
+            let mut net_used = virtio::VirtQUsed::empty();
+            let mut net_wdesc = [virtio::VirtQDesc::empty(); 128];
+            let mut net_wavail = virtio::VirtqAvailable::empty();
+            let mut net_wused = virtio::VirtQUsed::empty();
+
             for child in root.children_by_prop("compatible", |prop| prop.value == b"virtio,mmio\0")
             {
                 if let Some(reg) = child.prop_by_name("reg") {
@@ -116,22 +124,34 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
                     if let Some(virtio) = unsafe { VirtIORegs::new(addr as *mut VirtIORegs) } {
                         match virtio.device_id() {
                             virtio::DeviceId::Blk => {
-                                virtio_blk = virtio::VirtIOBlk::init(
+                                virtio_blk = Some(virtio::VirtIOBlk::new(
                                     virtio,
                                     &mut blk_desc,
                                     &mut blk_avail,
                                     &mut blk_used,
                                     irq,
-                                );
+                                ));
                             }
                             virtio::DeviceId::Entropy => {
-                                virtio_entropy = virtio::VirtIOEntropy::init(
+                                virtio_entropy = Some(virtio::VirtIOEntropy::new(
                                     virtio,
                                     &mut entropy_desc,
                                     &mut entropy_avail,
                                     &mut entropy_used,
                                     irq,
-                                );
+                                ));
+                            }
+                            virtio::DeviceId::Net => {
+                                virtio_net = Some(virtio::VirtIONet::new(
+                                    virtio,
+                                    &mut net_desc,
+                                    &mut net_avail,
+                                    &mut net_used,
+                                    &mut net_wdesc,
+                                    &mut net_wavail,
+                                    &mut net_wused,
+                                    irq,
+                                ));
                             }
                             _ => {}
                         }
@@ -140,8 +160,15 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
             }
             virtio_blk.map(|blk| {
                 virtio_entropy.map(|entropy| {
-                    let mut shell = apps::shell::App { uart, blk, entropy };
-                    shell.main();
+                    virtio_net.map(|net| {
+                        let mut shell = apps::shell::App {
+                            uart,
+                            blk,
+                            entropy,
+                            net,
+                        };
+                        shell.main();
+                    })
                 });
             });
         });

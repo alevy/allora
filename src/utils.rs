@@ -113,6 +113,7 @@ impl<T: HasEndianness + fmt::LowerHex, D: Endianness> fmt::LowerHex for Endian<T
     }
 }
 
+/// Memory barrier
 pub fn mb() {
     unsafe {
         asm!("dsb 0");

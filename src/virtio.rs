@@ -1,13 +1,12 @@
 use crate::utils::*;
-use core::ptr::{read_volatile, write_volatile};
 
 mod blk;
 mod entropy;
+mod net;
 
 pub use blk::VirtIOBlk;
 pub use entropy::VirtIOEntropy;
-
-const BLK_DEVICE_FEATURES: u32 = 0;
+pub use net::VirtIONet;
 
 #[derive(Debug)]
 pub enum Status {
@@ -190,82 +189,6 @@ impl VirtIORegs {
             8 => DeviceId::SCSIHost,
             9 => DeviceId::NinePTransport,
             _ => DeviceId::Invalid,
-        }
-    }
-}
-
-pub trait VirtIODevice<'a>: Sized {
-    unsafe fn new(
-        regs: &'a mut VirtIORegs,
-        desc: &'a mut [VirtQDesc],
-        avail: &'a mut VirtqAvailable,
-        used: &'a mut VirtQUsed,
-        irq: crate::gic::GIC,
-    ) -> Self;
-
-    fn init(
-        regs: &'a mut VirtIORegs,
-        desc: &'a mut [VirtQDesc],
-        avail: &'a mut VirtqAvailable,
-        used: &'a mut VirtQUsed,
-        irq: crate::gic::GIC,
-    ) -> Option<Self> {
-        unsafe {
-            write_volatile(&mut regs.status, Status::Reset.into());
-            mb();
-            write_volatile(&mut regs.status, Status::Acknowledge.into());
-            mb();
-            write_volatile(&mut regs.status, Status::Driver.into());
-            mb();
-
-            write_volatile(&mut regs.device_features_sel, 0.into());
-            mb();
-            let device_features = read_volatile(&mut regs.device_features).native();
-            write_volatile(&mut regs.driver_features_sel, 0.into());
-            mb();
-            write_volatile(
-                &mut regs.driver_features,
-                (BLK_DEVICE_FEATURES & device_features).into(),
-            );
-            mb();
-
-            write_volatile(&mut regs.status, Status::FeaturesOk.into());
-            mb();
-            if read_volatile(&mut regs.status).native() & (Status::FeaturesOk as u32) == 0 {
-                panic!("Coudln't set blk features");
-            }
-
-            write_volatile(&mut regs.queue_sel, 0.into());
-            mb();
-            write_volatile(&mut regs.queue_num, (desc.len() as u32).into());
-            write_volatile(
-                &mut regs.queue_desc_low,
-                ((desc.as_ptr() as usize) as u32).into(),
-            );
-            write_volatile(
-                &mut regs.queue_desc_high,
-                ((desc.as_ptr() as usize >> 32) as u32).into(),
-            );
-            write_volatile(&mut regs.queue_avail_low, (avail as *const _ as u32).into());
-            write_volatile(
-                &mut regs.queue_avail_high,
-                ((avail as *const _ as usize >> 32) as u32).into(),
-            );
-            write_volatile(&mut regs.queue_used_low, (used as *const _ as u32).into());
-            write_volatile(
-                &mut regs.queue_used_high,
-                ((used as *const _ as usize >> 32) as u32).into(),
-            );
-            mb();
-            write_volatile(&mut regs.queue_ready, 1.into());
-            mb();
-
-            write_volatile(&mut regs.status, Status::DriverOk.into());
-            mb();
-            if read_volatile(&mut regs.status).native() & (Status::DriverOk as u32) == 0 {
-                panic!("Coudln't set blk features");
-            }
-            Some(Self::new(regs, desc, avail, used, irq))
         }
     }
 }

@@ -1,7 +1,7 @@
 use crate::utils::*;
 use core::ptr::{read_volatile, write_volatile};
 
-use super::{VirtIODevice, VirtIORegs, VirtQDesc, VirtQUsed, VirtqAvailable};
+use super::{Status, VirtIORegs, VirtQDesc, VirtQUsed, VirtqAvailable};
 
 pub struct VirtIOEntropy<'a> {
     regs: &'a mut VirtIORegs,
@@ -11,14 +11,53 @@ pub struct VirtIOEntropy<'a> {
     irq: crate::gic::GIC,
 }
 
-impl<'a> VirtIODevice<'a> for VirtIOEntropy<'a> {
-    unsafe fn new(
+impl<'a> VirtIOEntropy<'a> {
+    pub fn new(
         regs: &'a mut VirtIORegs,
         desc: &'a mut [VirtQDesc],
         avail: &'a mut VirtqAvailable,
         used: &'a mut VirtQUsed,
         irq: crate::gic::GIC,
     ) -> Self {
+        unsafe {
+            write_volatile(&mut regs.status, Status::Reset.into());
+            write_volatile(&mut regs.status, Status::Acknowledge.into());
+            write_volatile(&mut regs.status, Status::Driver.into());
+
+            write_volatile(&mut regs.device_features_sel, 0.into());
+            let device_features = read_volatile(&mut regs.device_features).native();
+            write_volatile(&mut regs.driver_features_sel, 0.into());
+            write_volatile(&mut regs.driver_features, (0 & device_features).into());
+
+            write_volatile(&mut regs.status, Status::FeaturesOk.into());
+            if read_volatile(&mut regs.status).native() & (Status::FeaturesOk as u32) == 0 {
+                panic!("Coudln't set entropy features");
+            }
+
+            write_volatile(&mut regs.queue_sel, 0.into());
+            write_volatile(&mut regs.queue_num, (desc.len() as u32).into());
+            write_volatile(
+                &mut regs.queue_desc_low,
+                ((desc.as_ptr() as usize) as u32).into(),
+            );
+            write_volatile(
+                &mut regs.queue_desc_high,
+                ((desc.as_ptr() as usize >> 32) as u32).into(),
+            );
+            write_volatile(&mut regs.queue_avail_low, (avail as *const _ as u32).into());
+            write_volatile(
+                &mut regs.queue_avail_high,
+                ((avail as *const _ as usize >> 32) as u32).into(),
+            );
+            write_volatile(&mut regs.queue_used_low, (used as *const _ as u32).into());
+            write_volatile(
+                &mut regs.queue_used_high,
+                ((used as *const _ as usize >> 32) as u32).into(),
+            );
+            write_volatile(&mut regs.queue_ready, 1.into());
+
+            write_volatile(&mut regs.status, Status::DriverOk.into());
+        }
         VirtIOEntropy {
             regs,
             desc,
@@ -55,6 +94,13 @@ impl<'a> VirtIOEntropy<'a> {
             while read_volatile(&self.used.idx).native() != read_volatile(&self.avail.idx).native()
             {
                 asm!("wfi");
+                let status = read_volatile(&self.regs.interrupt_status);
+                if status.native() != 0 {
+                    write_volatile(&mut self.regs.interrupt_ack, status);
+                    if read_volatile(&self.regs.interrupt_status).native() == status.native() {
+                        panic!("{:#x}", self.regs.interrupt_status.native());
+                    }
+                }
             }
             self.irq.disable();
         }

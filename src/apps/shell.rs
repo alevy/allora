@@ -2,13 +2,13 @@ use core::fmt::Write;
 use core::str::from_utf8;
 
 use crate::uart::UART;
-use crate::virtio::VirtIOBlk;
-use crate::virtio::VirtIOEntropy;
+use crate::virtio::{VirtIOBlk, VirtIOEntropy, VirtIONet};
 
 pub struct App<'a, 'b> {
     pub uart: &'a mut UART,
     pub blk: VirtIOBlk<'b>,
     pub entropy: VirtIOEntropy<'b>,
+    pub net: VirtIONet<'b>,
 }
 
 impl<'a, 'b> App<'a, 'b> {
@@ -118,6 +118,13 @@ impl<'a, 'b> App<'a, 'b> {
                 }
                 Some(b"write") => {
                     self.write(&mut words);
+                }
+                Some(b"netr") => {
+                    let mut net = super::net::Net {
+                        uart: &mut self.uart,
+                        net: &mut self.net,
+                    };
+                    net.serve_ping(&mut words);
                 }
                 Some(b"exit") => {
                     break;
