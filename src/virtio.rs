@@ -49,7 +49,7 @@ type LEU32 = Endian<u32, Little>;
 type LEU64 = Endian<u64, Little>;
 
 #[repr(C)]
-pub struct VirtIORegs {
+pub struct VirtIORegs<C = LEU64> {
     pub magic: LEU32,
     pub version: LEU32,
     pub device_id: LEU32,
@@ -83,7 +83,7 @@ pub struct VirtIORegs {
     pub queue_used_high: LEU32,
     _reserved9: [u32; 21],
     pub config_generation: LEU32,
-    pub config: LEU64,
+    pub config: C,
 }
 
 const MAGIC: u32 = 0x74726976;
@@ -128,7 +128,7 @@ impl VirtqAvailable {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 #[repr(C, packed)]
 struct VirtQUsedElement {
     id: Endian<u16, Little>,
@@ -164,8 +164,24 @@ impl VirtQUsed {
     }
 }
 
-impl VirtIORegs {
-    pub unsafe fn new<'a>(base: *mut VirtIORegs) -> Option<&'a mut VirtIORegs> {
+pub struct Queue<const S: usize> {
+    pub descriptors: [VirtQDesc; S],
+    pub available: VirtqAvailable,
+    pub used: VirtQUsed,
+}
+
+impl<const S: usize> Queue<S> {
+    pub const fn new() -> Self {
+        Queue {
+            descriptors: [VirtQDesc::empty(); S],
+            available: VirtqAvailable::empty(),
+            used: VirtQUsed::empty(),
+        }
+    }
+}
+
+impl<C> VirtIORegs<C> {
+    pub unsafe fn new<'a>(base: *mut Self) -> Option<&'a mut Self> {
         let candidate = &mut *base;
         if candidate.magic.native() == MAGIC
             && candidate.version.native() == 2

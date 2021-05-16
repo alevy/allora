@@ -6,15 +6,9 @@ use super::{Status, VirtIORegs, VirtQDesc, VirtQUsed, VirtqAvailable};
 type LEU16 = Endian<u16, Little>;
 
 pub struct VirtIONet<'a> {
-    regs: &'a mut VirtIORegs,
-    pub config: &'a VirtIONetConfig,
-    desc: &'a mut [VirtQDesc],
-    avail: &'a mut VirtqAvailable,
-    used: &'a mut VirtQUsed,
-
-    wdesc: &'a mut [VirtQDesc],
-    wavail: &'a mut VirtqAvailable,
-    wused: &'a mut VirtQUsed,
+    regs: &'a mut VirtIORegs<VirtIONetConfig>,
+    read_queue: &'a mut super::Queue<128>,
+    write_queue: &'a mut super::Queue<128>,
     irq: crate::gic::GIC,
 }
 
@@ -42,14 +36,9 @@ const NET_DEVICE_FEATURES: u32 = 1 << 5; // VIRTIO_NET_F_MAC
 
 impl<'a> VirtIONet<'a> {
     pub fn new(
-        regs: &'a mut VirtIORegs,
-        desc: &'a mut [VirtQDesc],
-        avail: &'a mut VirtqAvailable,
-        used: &'a mut VirtQUsed,
-
-        wdesc: &'a mut [VirtQDesc],
-        wavail: &'a mut VirtqAvailable,
-        wused: &'a mut VirtQUsed,
+        regs: &'a mut VirtIORegs<VirtIONetConfig>,
+        read_queue: &'a mut super::Queue<128>,
+        write_queue: &'a mut super::Queue<128>,
         irq: crate::gic::GIC,
     ) -> Self {
         unsafe {
@@ -70,161 +59,136 @@ impl<'a> VirtIONet<'a> {
                 panic!("Coudln't set blk features");
             }
 
-            write_volatile(&mut regs.queue_sel, 0.into());
-            write_volatile(&mut regs.queue_num, (desc.len() as u32).into());
-            write_volatile(
-                &mut regs.queue_desc_low,
-                ((desc.as_ptr() as usize) as u32).into(),
-            );
-            write_volatile(
-                &mut regs.queue_desc_high,
-                ((desc.as_ptr() as usize >> 32) as u32).into(),
-            );
-            write_volatile(&mut regs.queue_avail_low, (avail as *const _ as u32).into());
-            write_volatile(
-                &mut regs.queue_avail_high,
-                ((avail as *const _ as usize >> 32) as u32).into(),
-            );
-            write_volatile(&mut regs.queue_used_low, (used as *const _ as u32).into());
-            write_volatile(
-                &mut regs.queue_used_high,
-                ((used as *const _ as usize >> 32) as u32).into(),
-            );
-            write_volatile(&mut regs.queue_ready, 1.into());
-
-            write_volatile(&mut regs.queue_sel, 1.into());
-            write_volatile(&mut regs.queue_num, (wdesc.len() as u32).into());
-            write_volatile(
-                &mut regs.queue_desc_low,
-                ((wdesc.as_ptr() as usize) as u32).into(),
-            );
-            write_volatile(
-                &mut regs.queue_desc_high,
-                ((wdesc.as_ptr() as usize >> 32) as u32).into(),
-            );
-            write_volatile(
-                &mut regs.queue_avail_low,
-                (wavail as *const _ as u32).into(),
-            );
-            write_volatile(
-                &mut regs.queue_avail_high,
-                ((wavail as *const _ as usize >> 32) as u32).into(),
-            );
-            write_volatile(&mut regs.queue_used_low, (wused as *const _ as u32).into());
-            write_volatile(
-                &mut regs.queue_used_high,
-                ((wused as *const _ as usize >> 32) as u32).into(),
-            );
-            write_volatile(&mut regs.queue_ready, 1.into());
+            for (i, queue) in [&read_queue, &write_queue].iter().enumerate() {
+                write_volatile(&mut regs.queue_sel, (i as u32).into());
+                write_volatile(&mut regs.queue_num, (queue.descriptors.len() as u32).into());
+                write_volatile(
+                    &mut regs.queue_desc_low,
+                    ((queue.descriptors.as_ptr() as usize) as u32).into(),
+                );
+                write_volatile(
+                    &mut regs.queue_desc_high,
+                    ((queue.descriptors.as_ptr() as usize >> 32) as u32).into(),
+                );
+                write_volatile(
+                    &mut regs.queue_avail_low,
+                    (&queue.available as *const VirtqAvailable as u32).into(),
+                );
+                write_volatile(
+                    &mut regs.queue_avail_high,
+                    ((&queue.available as *const VirtqAvailable as usize >> 32) as u32).into(),
+                );
+                write_volatile(
+                    &mut regs.queue_used_low,
+                    (&queue.used as *const VirtQUsed as u32).into(),
+                );
+                write_volatile(
+                    &mut regs.queue_used_high,
+                    ((&queue.used as *const VirtQUsed as usize >> 32) as u32).into(),
+                );
+                write_volatile(&mut regs.queue_ready, 1.into());
+            }
 
             write_volatile(&mut regs.status, Status::DriverOk.into());
         }
-        let config = unsafe { &*(&regs.config as *const _ as *const VirtIONetConfig) };
         VirtIONet {
             regs,
-            config,
-            desc,
-            avail,
-            used,
-            wdesc,
-            wavail,
-            wused,
+            read_queue,
+            write_queue,
             irq,
         }
     }
 }
 
 impl<'a> VirtIONet<'a> {
-    pub fn read(&mut self, data: &mut [u8; 1526]) -> NetHdr {
+    pub fn config(&self) -> &VirtIONetConfig {
+        unsafe { &*(&self.regs.config as *const _ as *const VirtIONetConfig) }
+    }
+
+    fn enqueue(&mut self, qnum: u32, descriptor: u16) {
+        let queue = match qnum {
+            0 => &mut self.read_queue,
+            _ => &mut self.write_queue,
+        };
+
+        queue.available.ring[queue.available.idx.native() as usize % queue.available.ring.len()] =
+            descriptor.into();
+        mb();
+
+        queue.available.idx = (queue.available.idx.native().wrapping_add(1)).into();
+        mb();
+        self.regs.queue_notify = qnum.into();
+    }
+
+    pub fn read(&mut self, data: &mut [u8; 1526]) {
+        let mut blkreq_hdr = NetHdr {
+            ..Default::default()
+        };
+
+        self.read_queue.descriptors[0] = VirtQDesc {
+            addr: (&mut blkreq_hdr as *mut _ as u64).into(),
+            len: (core::mem::size_of::<NetHdr>() as u32).into(),
+            flags: (3).into(),
+            next: 1.into(),
+        };
+
+        self.read_queue.descriptors[1] = VirtQDesc {
+            addr: (data.as_ptr() as *const _ as u64).into(),
+            len: (data.len() as u32).into(),
+            flags: (2).into(),
+            next: 0.into(),
+        };
+
+        self.enqueue(0, 0);
+
         unsafe {
-            let mut blkreq_hdr = NetHdr {
-                ..Default::default()
-            };
-
-            write_volatile(
-                &mut self.desc[0],
-                VirtQDesc {
-                    addr: (&mut blkreq_hdr as *mut _ as u64).into(),
-                    len: (core::mem::size_of::<NetHdr>() as u32).into(),
-                    flags: (3).into(),
-                    next: 1.into(),
-                },
-            );
-
-            write_volatile(
-                &mut self.desc[1],
-                VirtQDesc {
-                    addr: (data.as_ptr() as *const _ as u64).into(),
-                    len: (data.len() as u32).into(),
-                    flags: (2).into(),
-                    next: 0.into(),
-                },
-            );
-
-            write_volatile(
-                &mut self.avail.ring[self.avail.idx.native() as usize],
-                0.into(),
-            );
-            write_volatile(&mut self.avail.idx, (self.avail.idx.native() + 1).into());
-            write_volatile(&mut self.regs.queue_notify, 0.into());
             self.irq.enable();
-            while read_volatile(&self.used.idx).native() != read_volatile(&self.avail.idx).native()
+            while read_volatile(&self.read_queue.used.idx)
+                != read_volatile(&self.read_queue.available.idx)
             {
                 asm!("wfi");
                 let status = read_volatile(&self.regs.interrupt_status);
                 if status.native() != 0 {
-                    write_volatile(&mut self.regs.interrupt_ack, status);
+                    write_volatile(&mut self.regs.interrupt_ack, 0b11.into());
                 }
             }
             self.irq.disable();
-            read_volatile(self.desc[0].addr.native() as *const NetHdr)
         }
     }
 
-    pub fn write(&mut self, data: &mut [u8; 1526]) -> NetHdr {
+    pub fn write(&mut self, data: &[u8; 1526]) {
+        let mut blkreq_hdr = NetHdr {
+            ..Default::default()
+        };
+
+        self.write_queue.descriptors[0] = VirtQDesc {
+            addr: (&mut blkreq_hdr as *mut _ as u64).into(),
+            len: (core::mem::size_of::<NetHdr>() as u32).into(),
+            flags: (1).into(),
+            next: 1.into(),
+        };
+
+        self.write_queue.descriptors[1] = VirtQDesc {
+            addr: (data.as_ptr() as *const _ as u64).into(),
+            len: (data.len() as u32).into(),
+            flags: (0).into(),
+            next: 0.into(),
+        };
+
+        self.enqueue(1, 0);
+
         unsafe {
-            let mut blkreq_hdr = NetHdr {
-                ..Default::default()
-            };
-
-            write_volatile(
-                &mut self.wdesc[0],
-                VirtQDesc {
-                    addr: (&mut blkreq_hdr as *mut _ as u64).into(),
-                    len: (core::mem::size_of::<NetHdr>() as u32).into(),
-                    flags: (1).into(),
-                    next: 1.into(),
-                },
-            );
-
-            write_volatile(
-                &mut self.wdesc[1],
-                VirtQDesc {
-                    addr: (data.as_ptr() as *const _ as u64).into(),
-                    len: (data.len() as u32).into(),
-                    flags: (0).into(),
-                    next: 0.into(),
-                },
-            );
-
-            write_volatile(
-                &mut self.wavail.ring[self.wavail.idx.native() as usize],
-                0.into(),
-            );
-            write_volatile(&mut self.wavail.idx, (self.wavail.idx.native() + 1).into());
-            write_volatile(&mut self.regs.queue_notify, 1.into());
             self.irq.enable();
-            while read_volatile(&self.wused.idx).native()
-                != read_volatile(&self.wavail.idx).native()
+            while read_volatile(&self.write_queue.used.idx)
+                != read_volatile(&self.write_queue.available.idx)
             {
                 asm!("wfi");
                 let status = read_volatile(&self.regs.interrupt_status);
                 if status.native() != 0 {
-                    write_volatile(&mut self.regs.interrupt_ack, status);
+                    write_volatile(&mut self.regs.interrupt_ack, 0b11.into());
                 }
             }
             self.irq.disable();
-            read_volatile(self.wdesc[0].addr.native() as *const NetHdr)
         }
     }
 }

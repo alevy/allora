@@ -2,23 +2,23 @@ use core::fmt::Write;
 use core::str::from_utf8;
 
 use crate::uart::UART;
-use crate::virtio::{VirtIOBlk, VirtIOEntropy, VirtIONet};
+use crate::virtio::{VirtIOBlk, VirtIOEntropy, VirtIONet };
 
-pub struct App<'a, 'b> {
-    pub uart: &'a mut UART,
+pub struct Shell<'b> {
     pub blk: VirtIOBlk<'b>,
     pub entropy: VirtIOEntropy<'b>,
-    pub net: VirtIONet<'b>,
+    pub net: Option<VirtIONet<'b>>,
 }
 
-impl<'a, 'b> App<'a, 'b> {
-    fn get_random(&mut self) {
+impl<'b> Shell<'b> {
+    fn get_random<F: FnMut(&[u8])>(&mut self, mut f: F) {
         let mut data: [u8; 16] = [0; 16];
         self.entropy.read(&mut data);
-        let _ = write!(self.uart, "Random: {:?}\n", &data);
+        f(b"Random: ");
+        f(&data);
     }
 
-    fn write_random(&mut self, words: &mut dyn Iterator<Item = &[u8]>) {
+    fn write_random<F: FnMut(&[u8])>(&mut self, words: &mut dyn Iterator<Item = &[u8]>, mut f: F) {
         let mut sector = words
             .next()
             .and_then(|sec| from_utf8(sec).ok())
@@ -43,9 +43,10 @@ impl<'a, 'b> App<'a, 'b> {
             sector += 1;
             len -= curlen;
         }
+        f(b"done");
     }
 
-    fn read(&mut self, words: &mut dyn Iterator<Item = &[u8]>) {
+    fn read<F: FnMut(&[u8])>(&mut self, words: &mut dyn Iterator<Item = &[u8]>, mut f: F) {
         let sector = words
             .next()
             .and_then(|sec| from_utf8(sec).ok())
@@ -60,17 +61,16 @@ impl<'a, 'b> App<'a, 'b> {
         loop {
             self.blk.read(sector, &mut data);
             if len > 512 {
-                self.uart.write_bytes(&data);
+                f(&data);
                 len -= 512;
             } else {
-                self.uart.write_bytes(&data[..len]);
-                self.uart.write_byte(b'\n');
+                f(&data[..len]);
                 break;
             }
         }
     }
 
-    fn write(&mut self, words: &mut dyn Iterator<Item = &[u8]>) {
+    /*fn write<F: FnMut(&[u8])>(&mut self, words: &mut dyn Iterator<Item = &[u8]>, mut f: F) {
         let mut sector = words
             .next()
             .and_then(|sec| from_utf8(sec).ok())
@@ -98,45 +98,55 @@ impl<'a, 'b> App<'a, 'b> {
             sector += 1;
             len -= curlen;
         }
-    }
+    }*/
 
-    pub fn main(&mut self) {
-        loop {
-            let _ = write!(self.uart, "$> ");
-            let mut buf = [0; 1024];
-            let line = self.uart.read_line(&mut buf, true);
-            let mut words = line.split(|c| *c == b' ');
-            match words.next() {
-                Some(b"rand") => {
-                    self.get_random();
-                }
-                Some(b"writerand") => {
-                    self.write_random(&mut words);
-                }
-                Some(b"read") => {
-                    self.read(&mut words);
-                }
-                Some(b"write") => {
-                    self.write(&mut words);
-                }
-                Some(b"netr") => {
+    pub fn do_line<F>(&mut self, line: &[u8], mut f: F) -> bool where F: FnMut(&[u8]) {
+        let line = line.split(|c| *c == b'\n' || *c == b'\r').next().unwrap_or(&[]);
+        let mut words = line.split(|c| *c == b' ');
+        match words.next() {
+            Some(b"rand") => {
+                self.get_random(f);
+            }
+            Some(b"writerand") => {
+                self.write_random(&mut words, f);
+            }
+            Some(b"read") => {
+                self.read(&mut words, f);
+            }
+            /*Some(b"write") => {
+                self.write(&mut words, f);
+            }*/
+            Some(b"netshell") => {
+                self.net.take().as_mut().map(|vnet| {
                     let mut net = super::net::Net {
-                        uart: &mut self.uart,
-                        net: &mut self.net,
+                        net: vnet,
                     };
-                    net.serve_ping(&mut words);
-                }
-                Some(b"exit") => {
-                    break;
-                }
-                _ => {
-                    let _ = write!(
-                        self.uart,
-                        "Unknown command \"{}\"\n",
-                        from_utf8(line).unwrap_or("unknown")
-                    );
-                }
+                    net.run(self);
+                });
+            }
+            Some(b"exit") => {
+                return true;
+            }
+            _ => {
+                f(b"Unknown command \"");
+                f(line);
+                f(b"\"");
             }
         }
+        return false;
+    }
+}
+
+pub fn main(uart: &mut UART, app: &mut Shell) {
+    loop {
+        let _ = write!(uart, "$> ");
+        let mut buf = [0; 1024];
+        let line = uart.read_line(&mut buf, true);
+        if app.do_line(line, |output| {
+            uart.write_bytes(output);
+        }) {
+            break;
+        }
+        uart.write_byte(b'\n');
     }
 }

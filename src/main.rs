@@ -74,6 +74,8 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
             })
             .unwrap_or(2);
 
+        let mut net_shell = false;
+
         if let Some(chosen) = root.child_by_name("chosen") {
             chosen
                 .prop_by_name("stdout-path")
@@ -92,9 +94,27 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
                         }
                     });
                 });
+            if let Some(bootarg_prop) = chosen.prop_by_name("bootargs") {
+                let value = null_terminated_str(bootarg_prop.value);
+                for arg in value.split(|c| *c == b' ') {
+                    let mut split = arg.split(|c| *c == b'=');
+                    let key = split.next().unwrap_or(&[]);
+                    let val = split.next().unwrap_or(&[]);
+                    match key {
+                        b"shell" => {
+                            if val == b"udp" {
+                                net_shell = true;
+                            } else {
+                                net_shell = false;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
         uart.as_mut().map(|uart| {
-            let _ = write!(uart, "We booted!\n");
+            let _ = write!(uart, "Booting Allora...\n");
 
             let mut virtio_blk = None;
             let mut blk_desc = [virtio::VirtQDesc::empty(); 128];
@@ -107,12 +127,8 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
             let mut entropy_used = virtio::VirtQUsed::empty();
 
             let mut virtio_net: Option<virtio::VirtIONet> = None;
-            let mut net_desc = [virtio::VirtQDesc::empty(); 128];
-            let mut net_avail = virtio::VirtqAvailable::empty();
-            let mut net_used = virtio::VirtQUsed::empty();
-            let mut net_wdesc = [virtio::VirtQDesc::empty(); 128];
-            let mut net_wavail = virtio::VirtqAvailable::empty();
-            let mut net_wused = virtio::VirtQUsed::empty();
+            let mut net_read_queue = virtio::Queue::new();
+            let mut net_write_queue = virtio::Queue::new();
 
             for child in root.children_by_prop("compatible", |prop| prop.value == b"virtio,mmio\0")
             {
@@ -121,11 +137,11 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
                     let irq = unsafe {
                         crate::gic::GIC::new(interrupt_for_node(&child).unwrap_or(0) as u32)
                     };
-                    if let Some(virtio) = unsafe { VirtIORegs::new(addr as *mut VirtIORegs) } {
+                    if let Some(virtio) = unsafe { VirtIORegs::new(addr as *mut VirtIORegs<()>) } {
                         match virtio.device_id() {
                             virtio::DeviceId::Blk => {
                                 virtio_blk = Some(virtio::VirtIOBlk::new(
-                                    virtio,
+                                    unsafe { &mut *(virtio as *mut _ as *mut _) },
                                     &mut blk_desc,
                                     &mut blk_avail,
                                     &mut blk_used,
@@ -134,7 +150,7 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
                             }
                             virtio::DeviceId::Entropy => {
                                 virtio_entropy = Some(virtio::VirtIOEntropy::new(
-                                    virtio,
+                                    unsafe { &mut *(virtio as *mut _ as *mut _) },
                                     &mut entropy_desc,
                                     &mut entropy_avail,
                                     &mut entropy_used,
@@ -143,13 +159,9 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
                             }
                             virtio::DeviceId::Net => {
                                 virtio_net = Some(virtio::VirtIONet::new(
-                                    virtio,
-                                    &mut net_desc,
-                                    &mut net_avail,
-                                    &mut net_used,
-                                    &mut net_wdesc,
-                                    &mut net_wavail,
-                                    &mut net_wused,
+                                    unsafe { &mut *(virtio as *mut _ as *mut _) },
+                                    &mut net_read_queue,
+                                    &mut net_write_queue,
                                     irq,
                                 ));
                             }
@@ -160,14 +172,24 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
             }
             virtio_blk.map(|blk| {
                 virtio_entropy.map(|entropy| {
-                    virtio_net.map(|net| {
-                        let mut shell = apps::shell::App {
-                            uart,
-                            blk,
-                            entropy,
-                            net,
-                        };
-                        shell.main();
+                    virtio_net.map(|mut net| {
+                        if net_shell {
+                            let mut shell = apps::shell::Shell {
+                                blk,
+                                entropy,
+                                net: None,
+                            };
+                            apps::net::Net {
+                                net: &mut net,
+                            }.run(&mut shell)
+                        } else {
+                            let mut shell = apps::shell::Shell {
+                                blk,
+                                entropy,
+                                net: Some(net),
+                            };
+                            apps::shell::main(uart, &mut shell);
+                        }
                     })
                 });
             });

@@ -1,7 +1,3 @@
-use core::fmt::Write;
-use core::str::from_utf8;
-
-use crate::uart::UART;
 use crate::utils::*;
 use crate::virtio::VirtIONet;
 
@@ -70,12 +66,11 @@ struct ICMP {
 }
 
 pub struct Net<'a, 'b: 'a> {
-    pub uart: &'a mut UART,
     pub net: &'a mut VirtIONet<'b>,
 }
 
 impl<'a, 'b> Net<'a, 'b> {
-    pub fn serve_ping(&mut self, _words: &mut dyn Iterator<Item = &[u8]>) {
+    pub fn run(&mut self, shell: &mut super::shell::Shell) {
         let mut buf = [0; 1526];
         loop {
             self.net.read(&mut buf);
@@ -93,14 +88,14 @@ impl<'a, 'b> Net<'a, 'b> {
                         // ARP request
                         if arp.target_proto_addr == [192, 168, 14, 4] {
                             eth_header.dst_mac = eth_header.src_mac;
-                            eth_header.src_mac = self.net.config.mac;
+                            eth_header.src_mac = self.net.config().mac;
 
                             arp.operation = 2.into();
 
                             arp.target_hw_addr = arp.sender_hw_addr;
                             arp.target_proto_addr = arp.sender_proto_addr;
 
-                            arp.sender_hw_addr = self.net.config.mac;
+                            arp.sender_hw_addr = self.net.config().mac;
                             arp.sender_proto_addr = [192, 168, 14, 4];
                             self.net.write(&mut buf);
                         }
@@ -113,7 +108,7 @@ impl<'a, 'b> Net<'a, 'b> {
                         if ip.protocol == 0x1 {
                             // ICMP
                             eth_header.dst_mac = eth_header.src_mac;
-                            eth_header.src_mac = self.net.config.mac;
+                            eth_header.src_mac = self.net.config().mac;
 
                             ip.dst_addr = ip.src_addr;
                             ip.src_addr = [192, 168, 14, 4];
@@ -132,9 +127,59 @@ impl<'a, 'b> Net<'a, 'b> {
                         } else if ip.protocol == 0x11 && ip_payload[2] == 0 && ip_payload[3] == 44 {
                             // UDP port 44
                             let length = (ip_payload[4] as usize) << 8 | ip_payload[5] as usize;
-                            from_utf8(&ip_payload[8..length])
-                                .ok()
-                                .and_then(|pay| write!(&mut self.uart, "{}", pay).ok());
+                            let mut line = [0; 1024];
+                            line[..(length - 8)].copy_from_slice(&ip_payload[8..length]);
+
+                            eth_header.dst_mac = eth_header.src_mac;
+                            eth_header.src_mac = self.net.config().mac;
+
+                            ip.dst_addr = ip.src_addr;
+                            ip.src_addr = [192, 168, 14, 4];
+                            ip.id = 0.into();
+                            ip.flags_offset = 0.into();
+
+                            let udp_packet = unsafe {
+                                core::slice::from_raw_parts_mut(ip_payload.as_ptr() as *mut u8, ip_payload.len())
+                            };
+                            let (s0, s1) = (udp_packet[0], udp_packet[1]);
+                            let (d0, d1) = (udp_packet[2], udp_packet[3]);
+                            udp_packet[0] = d0;
+                            udp_packet[1] = d1;
+                            udp_packet[2] = s0;
+                            udp_packet[3] = s1;
+
+                            let exit = shell.do_line(&line, |output| {
+                                ip.length = ((8 + output.len() + core::mem::size_of::<IpHeader>()) as u16).into();
+                                ip.checksum = 0.into();
+                                ip.checksum = checksum(&eth_payload[..20]).into();
+
+                                let udp_packet = unsafe {
+                                    core::slice::from_raw_parts_mut(ip_payload.as_ptr() as *mut u8, ip_payload.len())
+                                };
+                                udp_packet[4] = ((8 + output.len()) >> 8) as u8;
+                                udp_packet[5] = output.len() as u8 + 8;
+                                udp_packet[6] = 0;
+                                udp_packet[7] = 0;
+                                udp_packet[8..(8 + output.len())].copy_from_slice(output);
+                                self.net.write(&buf);
+                            });
+                            if exit {
+                                return;
+                            }
+
+                            ip.length = ((8 + 1 + core::mem::size_of::<IpHeader>()) as u16).into();
+                            ip.checksum = 0.into();
+                            ip.checksum = checksum(&eth_payload[..20]).into();
+
+                            let udp_packet = unsafe {
+                                core::slice::from_raw_parts_mut(ip_payload.as_ptr() as *mut u8, ip_payload.len())
+                            };
+                            udp_packet[4] = ((8 + 1) >> 8) as u8;
+                            udp_packet[5] = 1 as u8 + 8;
+                            udp_packet[6] = 0;
+                            udp_packet[7] = 0;
+                            udp_packet[8] = b'\n';
+                            self.net.write(&buf);
                         }
                     }
                 }

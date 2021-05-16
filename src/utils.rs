@@ -37,6 +37,7 @@ impl_has_endianness!(i64);
 impl_has_endianness!(u128);
 impl_has_endianness!(i128);
 
+#[repr(transparent)]
 #[derive(Copy, Clone, Default, PartialEq, Eq)]
 pub struct Endian<T, E>(T, core::marker::PhantomData<E>);
 
@@ -60,9 +61,9 @@ impl<T: HasEndianness, E: Endianness> Endian<T, E> {
     }
 }
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, PartialEq, Eq)]
 pub struct Big;
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, PartialEq, Eq)]
 pub struct Little;
 
 pub trait Endianness {
