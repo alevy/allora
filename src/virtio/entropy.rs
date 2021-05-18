@@ -1,24 +1,16 @@
 use crate::utils::*;
 use core::ptr::{read_volatile, write_volatile};
 
-use super::{Status, VirtIORegs, VirtQDesc, VirtQUsed, VirtqAvailable};
+use super::{Queue, Status, VirtIORegs, VirtQDesc};
 
 pub struct VirtIOEntropy<'a> {
     regs: &'a mut VirtIORegs,
-    desc: &'a mut [VirtQDesc],
-    avail: &'a mut VirtqAvailable,
-    used: &'a mut VirtQUsed,
+    queue: &'a mut Queue<128>,
     irq: crate::gic::GIC,
 }
 
 impl<'a> VirtIOEntropy<'a> {
-    pub fn new(
-        regs: &'a mut VirtIORegs,
-        desc: &'a mut [VirtQDesc],
-        avail: &'a mut VirtqAvailable,
-        used: &'a mut VirtQUsed,
-        irq: crate::gic::GIC,
-    ) -> Self {
+    pub fn new(regs: &'a mut VirtIORegs, queue: &'a mut Queue<128>, irq: crate::gic::GIC) -> Self {
         unsafe {
             write_volatile(&mut regs.status, Status::Reset.into());
             write_volatile(&mut regs.status, Status::Acknowledge.into());
@@ -35,36 +27,36 @@ impl<'a> VirtIOEntropy<'a> {
             }
 
             write_volatile(&mut regs.queue_sel, 0.into());
-            write_volatile(&mut regs.queue_num, (desc.len() as u32).into());
+            write_volatile(&mut regs.queue_num, (queue.descriptors.len() as u32).into());
             write_volatile(
                 &mut regs.queue_desc_low,
-                ((desc.as_ptr() as usize) as u32).into(),
+                ((queue.descriptors.as_ptr() as usize) as u32).into(),
             );
             write_volatile(
                 &mut regs.queue_desc_high,
-                ((desc.as_ptr() as usize >> 32) as u32).into(),
+                ((queue.descriptors.as_ptr() as usize >> 32) as u32).into(),
             );
-            write_volatile(&mut regs.queue_avail_low, (avail as *const _ as u32).into());
+            write_volatile(
+                &mut regs.queue_avail_low,
+                (&queue.available as *const _ as u32).into(),
+            );
             write_volatile(
                 &mut regs.queue_avail_high,
-                ((avail as *const _ as usize >> 32) as u32).into(),
+                ((&queue.available as *const _ as usize >> 32) as u32).into(),
             );
-            write_volatile(&mut regs.queue_used_low, (used as *const _ as u32).into());
+            write_volatile(
+                &mut regs.queue_used_low,
+                (&queue.used as *const _ as u32).into(),
+            );
             write_volatile(
                 &mut regs.queue_used_high,
-                ((used as *const _ as usize >> 32) as u32).into(),
+                ((&queue.used as *const _ as usize >> 32) as u32).into(),
             );
             write_volatile(&mut regs.queue_ready, 1.into());
 
             write_volatile(&mut regs.status, Status::DriverOk.into());
         }
-        VirtIOEntropy {
-            regs,
-            desc,
-            avail,
-            used,
-            irq,
-        }
+        VirtIOEntropy { regs, queue, irq }
     }
 }
 
@@ -72,7 +64,7 @@ impl<'a> VirtIOEntropy<'a> {
     pub fn read(&mut self, data: &mut [u8]) {
         unsafe {
             write_volatile(
-                &mut self.desc[0],
+                &mut self.queue.descriptors[0],
                 VirtQDesc {
                     addr: (data.as_ptr() as *const _ as u64).into(),
                     len: (data.len() as u32).into(),
@@ -82,18 +74,22 @@ impl<'a> VirtIOEntropy<'a> {
             );
 
             write_volatile(
-                &mut self.avail.ring[self.avail.idx.native() as usize],
+                &mut self.queue.available.ring[self.queue.available.idx.native() as usize],
                 0.into(),
             );
             mb();
-            write_volatile(&mut self.avail.idx, (self.avail.idx.native() + 1).into());
+            write_volatile(
+                &mut self.queue.available.idx,
+                (self.queue.available.idx.native() + 1).into(),
+            );
             mb();
             write_volatile(&mut self.regs.queue_notify, 0.into());
             mb();
             self.irq.enable();
-            while read_volatile(&self.used.idx).native() != read_volatile(&self.avail.idx).native()
+            while read_volatile(&self.queue.used.idx).native()
+                != read_volatile(&self.queue.available.idx).native()
             {
-                asm!("wfi");
+                //asm!("wfi");
                 let status = read_volatile(&self.regs.interrupt_status);
                 if status.native() != 0 {
                     write_volatile(&mut self.regs.interrupt_ack, status);

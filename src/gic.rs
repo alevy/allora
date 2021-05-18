@@ -81,13 +81,23 @@ pub fn clear(interrupt: u32) {
     }
 }
 
+pub fn get_core(interrupt: u32) -> u32 {
+    let shift: u32 = (interrupt % GICD_ITARGETSR_SIZE) * GICD_ITARGETSR_BITS;
+    unsafe {
+        let addr: *mut u32 = GICD_ITARGETSR.add((interrupt / GICD_ITARGETSR_SIZE) as usize);
+        let value: u32 = ptr::read_volatile(addr);
+        let cores = (value >> shift) & 0xff;
+        (cores & (1 << cores.trailing_zeros())) - 1
+    }
+}
+
 pub fn set_core(interrupt: u32, core: u32) {
     let shift: u32 = (interrupt % GICD_ITARGETSR_SIZE) * GICD_ITARGETSR_BITS;
     unsafe {
         let addr: *mut u32 = GICD_ITARGETSR.add((interrupt / GICD_ITARGETSR_SIZE) as usize);
         let mut value: u32 = ptr::read_volatile(addr);
         value &= !(0xff << shift);
-        value |= core << shift;
+        value |= (1 << core) << shift;
         ptr::write_volatile(addr, value);
     }
 }
@@ -117,11 +127,12 @@ pub fn set_config(interrupt: u32, config: u32) {
 pub struct GIC(u32);
 
 impl GIC {
-    pub unsafe fn new(exception_num: u32) -> GIC {
+    pub const unsafe fn new(exception_num: u32) -> GIC {
         GIC(exception_num)
     }
 
     pub fn enable(&self) {
+        set_core(self.0, crate::utils::current_core() as u32);
         enable(self.0)
     }
 

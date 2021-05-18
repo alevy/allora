@@ -10,5 +10,6 @@ SECTIONS
 
     . = ALIGN(8);
     . = . + 0x40000;
-    LD_STACK_PTR = .;
+    LD_STACK_PTR0 = .;
+    HEAP_START = .;
 }

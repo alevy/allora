@@ -1,9 +1,14 @@
 #![no_main]
 #![no_std]
-#![feature(asm, global_asm)]
+#![feature(asm, alloc_error_handler, global_asm)]
+
+extern crate alloc;
+use alloc::boxed::Box;
 
 pub mod device_tree;
 pub mod gic;
+pub mod mutex;
+pub mod thread;
 pub mod uart;
 pub mod utils;
 pub mod virtio;
@@ -17,6 +22,11 @@ global_asm!(include_str!("boot.S"));
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
+
+extern "C" {
+    static HEAP_START: usize;
+    fn system_off() -> !;
+}
 
 fn null_terminated_str(bytes: &[u8]) -> &[u8] {
     if bytes[bytes.len() - 1] == 0 {
@@ -51,11 +61,19 @@ fn interrupt_for_node(node: &device_tree::Node) -> Option<u32> {
     })
 }
 
+#[global_allocator]
+static ALLOCATOR: linked_list_allocator::LockedHeap = linked_list_allocator::LockedHeap::empty();
+
 #[no_mangle]
 pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
     gic::init();
 
-    let mut uart = None;
+    static UART: mutex::Mutex<Option<uart::UART>> = mutex::Mutex::new(None);
+
+    static BLK: mutex::Mutex<Option<virtio::VirtIOBlk>> = mutex::Mutex::new(None);
+    static ENTROPY: mutex::Mutex<Option<virtio::VirtIOEntropy>> = mutex::Mutex::new(None);
+    static NET: mutex::Mutex<Option<virtio::VirtIONet>> = mutex::Mutex::new(None);
+
     if let Some(root) = dtb.root() {
         let size_cell = root
             .prop_by_name("#size-cells")
@@ -74,7 +92,21 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
             })
             .unwrap_or(2);
 
-        let mut net_shell = false;
+        for memory in root.children_by_prop("device_type", |prop| prop.value == b"memory\0") {
+            if let Some(reg) = memory.prop_by_name("reg") {
+                let (addr, rest) = regs_to_usize(reg.value, address_cell);
+                let (size, _) = regs_to_usize(rest, size_cell);
+                unsafe {
+                    let heap_start = &HEAP_START as *const _ as usize;
+                    if heap_start >= addr {
+                        ALLOCATOR.lock().init(heap_start, size);
+                        break;
+                    } else {
+                        panic!("{:#x} {:#x}", addr, heap_start);
+                    }
+                }
+            }
+        }
 
         if let Some(chosen) = root.child_by_name("chosen") {
             chosen
@@ -88,112 +120,93 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
                             let (addr, rest) = regs_to_usize(reg.value, address_cell);
                             let (size, _) = regs_to_usize(rest, size_cell);
                             if size == 0x1000 {
-                                uart =
+                                let mut uart = UART.lock();
+                                *uart =
                                     Some(unsafe { uart::UART::new(addr as _, gic::GIC::new(irq)) });
                             }
                         }
                     });
                 });
-            if let Some(bootarg_prop) = chosen.prop_by_name("bootargs") {
-                let value = null_terminated_str(bootarg_prop.value);
-                for arg in value.split(|c| *c == b' ') {
-                    let mut split = arg.split(|c| *c == b'=');
-                    let key = split.next().unwrap_or(&[]);
-                    let val = split.next().unwrap_or(&[]);
-                    match key {
-                        b"shell" => {
-                            if val == b"udp" {
-                                net_shell = true;
-                            } else {
-                                net_shell = false;
-                            }
+        }
+
+        for child in root.children_by_prop("compatible", |prop| prop.value == b"virtio,mmio\0") {
+            if let Some(reg) = child.prop_by_name("reg") {
+                let (addr, _rest) = regs_to_usize(reg.value, address_cell);
+                let irq =
+                    unsafe { crate::gic::GIC::new(interrupt_for_node(&child).unwrap_or(0) as u32) };
+                if let Some(virtio) = unsafe { VirtIORegs::new(addr as *mut VirtIORegs<()>) } {
+                    match virtio.device_id() {
+                        virtio::DeviceId::Blk => {
+                            let mut virtio_blk = BLK.lock();
+                            *virtio_blk = unsafe {
+                                Some(virtio::VirtIOBlk::new(
+                                    &mut *(virtio as *mut _ as *mut _),
+                                    Box::leak(Box::new(virtio::Queue::new())),
+                                    irq,
+                                ))
+                            };
+                        }
+                        virtio::DeviceId::Entropy => {
+                            let mut virtio_entropy = ENTROPY.lock();
+                            *virtio_entropy = unsafe {
+                                Some(virtio::VirtIOEntropy::new(
+                                    &mut *(virtio as *mut _ as *mut _),
+                                    Box::leak(Box::new(virtio::Queue::new())),
+                                    irq,
+                                ))
+                            };
+                        }
+                        virtio::DeviceId::Net => {
+                            let mut virtio_net = NET.lock();
+                            *virtio_net = unsafe {
+                                Some(virtio::VirtIONet::new(
+                                    &mut *(virtio as *mut _ as *mut _),
+                                    Box::leak(Box::new(virtio::Queue::new())),
+                                    Box::leak(Box::new(virtio::Queue::new())),
+                                    irq,
+                                ))
+                            };
                         }
                         _ => {}
                     }
                 }
             }
         }
-        uart.as_mut().map(|uart| {
-            let _ = write!(uart, "Booting Allora...\n");
+    }
 
-            let mut virtio_blk = None;
-            let mut blk_desc = [virtio::VirtQDesc::empty(); 128];
-            let mut blk_avail = virtio::VirtqAvailable::empty();
-            let mut blk_used = virtio::VirtQUsed::empty();
-
-            let mut virtio_entropy: Option<virtio::VirtIOEntropy> = None;
-            let mut entropy_desc = [virtio::VirtQDesc::empty(); 128];
-            let mut entropy_avail = virtio::VirtqAvailable::empty();
-            let mut entropy_used = virtio::VirtQUsed::empty();
-
-            let mut virtio_net: Option<virtio::VirtIONet> = None;
-            let mut net_read_queue = virtio::Queue::new();
-            let mut net_write_queue = virtio::Queue::new();
-
-            for child in root.children_by_prop("compatible", |prop| prop.value == b"virtio,mmio\0")
-            {
-                if let Some(reg) = child.prop_by_name("reg") {
-                    let (addr, _rest) = regs_to_usize(reg.value, address_cell);
-                    let irq = unsafe {
-                        crate::gic::GIC::new(interrupt_for_node(&child).unwrap_or(0) as u32)
-                    };
-                    if let Some(virtio) = unsafe { VirtIORegs::new(addr as *mut VirtIORegs<()>) } {
-                        match virtio.device_id() {
-                            virtio::DeviceId::Blk => {
-                                virtio_blk = Some(virtio::VirtIOBlk::new(
-                                    unsafe { &mut *(virtio as *mut _ as *mut _) },
-                                    &mut blk_desc,
-                                    &mut blk_avail,
-                                    &mut blk_used,
-                                    irq,
-                                ));
-                            }
-                            virtio::DeviceId::Entropy => {
-                                virtio_entropy = Some(virtio::VirtIOEntropy::new(
-                                    unsafe { &mut *(virtio as *mut _ as *mut _) },
-                                    &mut entropy_desc,
-                                    &mut entropy_avail,
-                                    &mut entropy_used,
-                                    irq,
-                                ));
-                            }
-                            virtio::DeviceId::Net => {
-                                virtio_net = Some(virtio::VirtIONet::new(
-                                    unsafe { &mut *(virtio as *mut _ as *mut _) },
-                                    &mut net_read_queue,
-                                    &mut net_write_queue,
-                                    irq,
-                                ));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            virtio_blk.map(|blk| {
-                virtio_entropy.map(|entropy| {
-                    virtio_net.map(|mut net| {
-                        if net_shell {
-                            let mut shell = apps::shell::Shell {
-                                blk,
-                                entropy,
-                                net: None,
-                            };
-                            apps::net::Net {
-                                net: &mut net,
-                            }.run(&mut shell)
-                        } else {
-                            let mut shell = apps::shell::Shell {
-                                blk,
-                                entropy,
-                                net: Some(net),
-                            };
-                            apps::shell::main(uart, &mut shell);
-                        }
-                    })
-                });
-            });
+    thread::spawn(|| {
+        UART.map(|uart| {
+            let _ = write!(uart, "Running from core {}\n", utils::current_core());
         });
+
+        let mut shell = apps::shell::Shell {
+            blk: &BLK,
+            entropy: &ENTROPY,
+        };
+        apps::shell::main(&UART, &mut shell);
+    });
+
+    UART.lock()
+        .as_mut()
+        .map(|uart| uart.write_bytes(b"Booting Allora...\n"));
+
+    thread::spawn(|| {
+        UART.map(|uart| {
+            let _ = write!(uart, "Running from core {}\n", utils::current_core());
+        });
+        NET.map(|mut net| {
+            let mut shell = apps::shell::Shell {
+                blk: &BLK,
+                entropy: &ENTROPY,
+            };
+            apps::net::Net { net: &mut net }.run(&mut shell)
+        });
+    });
+
+    loop {
+        unsafe {
+            asm!("wfi");
+        }
     }
 }
 
@@ -201,8 +214,10 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
 fn panic(panic_info: &PanicInfo<'_>) -> ! {
     let mut uart = unsafe { uart::UART::new(0x0900_0000 as _, gic::GIC::new(uart::IRQ)) };
     let _ = uart.write_fmt(format_args!("{}", panic_info));
-    extern "C" {
-        fn system_off() -> !;
-    }
     unsafe { system_off() }
+}
+
+#[alloc_error_handler]
+fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
+    panic!("allocation error: {:?}", layout)
 }

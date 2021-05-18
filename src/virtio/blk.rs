@@ -1,13 +1,11 @@
 use crate::utils::*;
 use core::ptr::{read_volatile, write_volatile};
 
-use super::{Status, VirtIORegs, VirtQDesc, VirtQUsed, VirtqAvailable, LEU32, LEU64};
+use super::{Queue, Status, VirtIORegs, VirtQDesc, LEU32, LEU64};
 
 pub struct VirtIOBlk<'a> {
     regs: &'a mut VirtIORegs,
-    desc: &'a mut [VirtQDesc],
-    avail: &'a mut VirtqAvailable,
-    used: &'a mut VirtQUsed,
+    queue: &'a mut Queue<128>,
     irq: crate::gic::GIC,
 }
 
@@ -21,13 +19,7 @@ pub struct BlkReqHdr {
 const BLK_DEVICE_FEATURES: u32 = 0;
 
 impl<'a> VirtIOBlk<'a> {
-    pub fn new(
-        regs: &'a mut VirtIORegs,
-        desc: &'a mut [VirtQDesc],
-        avail: &'a mut VirtqAvailable,
-        used: &'a mut VirtQUsed,
-        irq: crate::gic::GIC,
-    ) -> Self {
+    pub fn new(regs: &'a mut VirtIORegs, queue: &'a mut Queue<128>, irq: crate::gic::GIC) -> Self {
         unsafe {
             write_volatile(&mut regs.status, Status::Reset.into());
             write_volatile(&mut regs.status, Status::Acknowledge.into());
@@ -47,36 +39,36 @@ impl<'a> VirtIOBlk<'a> {
             }
 
             write_volatile(&mut regs.queue_sel, 0.into());
-            write_volatile(&mut regs.queue_num, (desc.len() as u32).into());
+            write_volatile(&mut regs.queue_num, (queue.descriptors.len() as u32).into());
             write_volatile(
                 &mut regs.queue_desc_low,
-                ((desc.as_ptr() as usize) as u32).into(),
+                ((queue.descriptors.as_ptr() as usize) as u32).into(),
             );
             write_volatile(
                 &mut regs.queue_desc_high,
-                ((desc.as_ptr() as usize >> 32) as u32).into(),
+                ((queue.descriptors.as_ptr() as usize >> 32) as u32).into(),
             );
-            write_volatile(&mut regs.queue_avail_low, (avail as *const _ as u32).into());
+            write_volatile(
+                &mut regs.queue_avail_low,
+                (&queue.available as *const _ as u32).into(),
+            );
             write_volatile(
                 &mut regs.queue_avail_high,
-                ((avail as *const _ as usize >> 32) as u32).into(),
+                ((&queue.available as *const _ as usize >> 32) as u32).into(),
             );
-            write_volatile(&mut regs.queue_used_low, (used as *const _ as u32).into());
+            write_volatile(
+                &mut regs.queue_used_low,
+                (&queue.used as *const _ as u32).into(),
+            );
             write_volatile(
                 &mut regs.queue_used_high,
-                ((used as *const _ as usize >> 32) as u32).into(),
+                ((&queue.used as *const _ as usize >> 32) as u32).into(),
             );
             write_volatile(&mut regs.queue_ready, 1.into());
 
             write_volatile(&mut regs.status, Status::DriverOk.into());
         }
-        VirtIOBlk {
-            regs,
-            desc,
-            avail,
-            used,
-            irq,
-        }
+        VirtIOBlk { regs, queue, irq }
     }
 }
 
@@ -93,7 +85,7 @@ impl<'a> VirtIOBlk<'a> {
             write_volatile(&mut status, 0);
 
             write_volatile(
-                &mut self.desc[0],
+                &mut self.queue.descriptors[0],
                 VirtQDesc {
                     addr: (&blkreq_hdr as *const _ as u64).into(),
                     len: (core::mem::size_of::<BlkReqHdr>() as u32).into(),
@@ -103,7 +95,7 @@ impl<'a> VirtIOBlk<'a> {
             );
 
             write_volatile(
-                &mut self.desc[1],
+                &mut self.queue.descriptors[1],
                 VirtQDesc {
                     addr: (data.as_ptr() as *const _ as u64).into(),
                     len: (512).into(),
@@ -113,7 +105,7 @@ impl<'a> VirtIOBlk<'a> {
             );
 
             write_volatile(
-                &mut self.desc[2],
+                &mut self.queue.descriptors[2],
                 VirtQDesc {
                     addr: (&status as *const _ as u64).into(),
                     len: (1).into(),
@@ -123,18 +115,22 @@ impl<'a> VirtIOBlk<'a> {
             );
 
             write_volatile(
-                &mut self.avail.ring[self.avail.idx.native() as usize],
+                &mut self.queue.available.ring[self.queue.available.idx.native() as usize],
                 0.into(),
             );
             mb();
-            write_volatile(&mut self.avail.idx, (self.avail.idx.native() + 1).into());
+            write_volatile(
+                &mut self.queue.available.idx,
+                (self.queue.available.idx.native() + 1).into(),
+            );
             mb();
             write_volatile(&mut self.regs.queue_notify, 0.into());
             mb();
             self.irq.enable();
-            while read_volatile(&self.used.idx).native() != read_volatile(&self.avail.idx).native()
+            while read_volatile(&self.queue.used.idx).native()
+                != read_volatile(&self.queue.available.idx).native()
             {
-                asm!("wfi");
+                //asm!("wfi");
                 let status = read_volatile(&self.regs.interrupt_status);
                 if status.native() != 0 {
                     write_volatile(&mut self.regs.interrupt_ack, status);
@@ -159,7 +155,7 @@ impl<'a> VirtIOBlk<'a> {
             write_volatile(&mut status, 0);
 
             write_volatile(
-                &mut self.desc[0],
+                &mut self.queue.descriptors[0],
                 VirtQDesc {
                     addr: (&blkreq_hdr as *const _ as u64).into(),
                     len: (core::mem::size_of::<BlkReqHdr>() as u32).into(),
@@ -169,7 +165,7 @@ impl<'a> VirtIOBlk<'a> {
             );
 
             write_volatile(
-                &mut self.desc[1],
+                &mut self.queue.descriptors[1],
                 VirtQDesc {
                     addr: (data.as_ptr() as *const _ as u64).into(),
                     len: (512).into(),
@@ -179,7 +175,7 @@ impl<'a> VirtIOBlk<'a> {
             );
 
             write_volatile(
-                &mut self.desc[2],
+                &mut self.queue.descriptors[2],
                 VirtQDesc {
                     addr: (&status as *const _ as u64).into(),
                     len: (1).into(),
@@ -189,18 +185,22 @@ impl<'a> VirtIOBlk<'a> {
             );
 
             write_volatile(
-                &mut self.avail.ring[self.avail.idx.native() as usize],
+                &mut self.queue.available.ring[self.queue.available.idx.native() as usize],
                 0.into(),
             );
             mb();
-            write_volatile(&mut self.avail.idx, (self.avail.idx.native() + 1).into());
+            write_volatile(
+                &mut self.queue.available.idx,
+                (self.queue.available.idx.native() + 1).into(),
+            );
             mb();
             write_volatile(&mut self.regs.queue_notify, 0.into());
             mb();
             self.irq.enable();
-            while read_volatile(&self.used.idx).native() != read_volatile(&self.avail.idx).native()
+            while read_volatile(&self.queue.used.idx).native()
+                != read_volatile(&self.queue.available.idx).native()
             {
-                asm!("wfi");
+                //asm!("wfi");
             }
             self.irq.disable();
         }

@@ -5,6 +5,8 @@ use core::str;
 use crate::gic::GIC;
 
 pub struct UART(*mut u32, GIC);
+unsafe impl Send for UART {}
+unsafe impl Sync for UART {}
 
 pub const IRQ: u32 = 0x21;
 

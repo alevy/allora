@@ -120,3 +120,13 @@ pub fn mb() {
         asm!("dsb 0");
     }
 }
+
+pub fn current_core() -> usize {
+    let core: usize;
+    unsafe {
+        asm!("mrs	{0}, MPIDR_EL1
+              and	{0}, {0}, #16777215
+              ", out(reg) core);
+    }
+    core
+}

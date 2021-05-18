@@ -146,7 +146,7 @@ impl<'a> VirtIONet<'a> {
             while read_volatile(&self.read_queue.used.idx)
                 != read_volatile(&self.read_queue.available.idx)
             {
-                asm!("wfi");
+                //asm!("wfi");
                 let status = read_volatile(&self.regs.interrupt_status);
                 if status.native() != 0 {
                     write_volatile(&mut self.regs.interrupt_ack, 0b11.into());
@@ -182,7 +182,7 @@ impl<'a> VirtIONet<'a> {
             while read_volatile(&self.write_queue.used.idx)
                 != read_volatile(&self.write_queue.available.idx)
             {
-                asm!("wfi");
+                //asm!("wfi");
                 let status = read_volatile(&self.regs.interrupt_status);
                 if status.native() != 0 {
                     write_volatile(&mut self.regs.interrupt_ack, 0b11.into());

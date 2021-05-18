@@ -139,7 +139,10 @@ impl<'a, 'b> Net<'a, 'b> {
                             ip.flags_offset = 0.into();
 
                             let udp_packet = unsafe {
-                                core::slice::from_raw_parts_mut(ip_payload.as_ptr() as *mut u8, ip_payload.len())
+                                core::slice::from_raw_parts_mut(
+                                    ip_payload.as_ptr() as *mut u8,
+                                    ip_payload.len(),
+                                )
                             };
                             let (s0, s1) = (udp_packet[0], udp_packet[1]);
                             let (d0, d1) = (udp_packet[2], udp_packet[3]);
@@ -149,12 +152,17 @@ impl<'a, 'b> Net<'a, 'b> {
                             udp_packet[3] = s1;
 
                             let exit = shell.do_line(&line, |output| {
-                                ip.length = ((8 + output.len() + core::mem::size_of::<IpHeader>()) as u16).into();
+                                ip.length = ((8 + output.len() + core::mem::size_of::<IpHeader>())
+                                    as u16)
+                                    .into();
                                 ip.checksum = 0.into();
                                 ip.checksum = checksum(&eth_payload[..20]).into();
 
                                 let udp_packet = unsafe {
-                                    core::slice::from_raw_parts_mut(ip_payload.as_ptr() as *mut u8, ip_payload.len())
+                                    core::slice::from_raw_parts_mut(
+                                        ip_payload.as_ptr() as *mut u8,
+                                        ip_payload.len(),
+                                    )
                                 };
                                 udp_packet[4] = ((8 + output.len()) >> 8) as u8;
                                 udp_packet[5] = output.len() as u8 + 8;
@@ -172,7 +180,10 @@ impl<'a, 'b> Net<'a, 'b> {
                             ip.checksum = checksum(&eth_payload[..20]).into();
 
                             let udp_packet = unsafe {
-                                core::slice::from_raw_parts_mut(ip_payload.as_ptr() as *mut u8, ip_payload.len())
+                                core::slice::from_raw_parts_mut(
+                                    ip_payload.as_ptr() as *mut u8,
+                                    ip_payload.len(),
+                                )
                             };
                             udp_packet[4] = ((8 + 1) >> 8) as u8;
                             udp_packet[5] = 1 as u8 + 8;

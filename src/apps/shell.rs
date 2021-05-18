@@ -1,19 +1,18 @@
-use core::fmt::Write;
 use core::str::from_utf8;
 
+use crate::mutex::Mutex;
 use crate::uart::UART;
-use crate::virtio::{VirtIOBlk, VirtIOEntropy, VirtIONet };
+use crate::virtio::{VirtIOBlk, VirtIOEntropy};
 
-pub struct Shell<'b> {
-    pub blk: VirtIOBlk<'b>,
-    pub entropy: VirtIOEntropy<'b>,
-    pub net: Option<VirtIONet<'b>>,
+pub struct Shell<'a, 'b> {
+    pub blk: &'a Mutex<Option<VirtIOBlk<'b>>>,
+    pub entropy: &'a Mutex<Option<VirtIOEntropy<'b>>>,
 }
 
-impl<'b> Shell<'b> {
+impl<'a, 'b> Shell<'a, 'b> {
     fn get_random<F: FnMut(&[u8])>(&mut self, mut f: F) {
         let mut data: [u8; 16] = [0; 16];
-        self.entropy.read(&mut data);
+        self.entropy.map(|e| e.read(&mut data));
         f(b"Random: ");
         f(&data);
     }
@@ -34,12 +33,12 @@ impl<'b> Shell<'b> {
             let curlen = core::cmp::min(512, len);
             {
                 let curbuf = &mut outdata[..curlen];
-                self.entropy.read(curbuf);
+                self.entropy.map(|e| e.read(curbuf));
                 for b in curbuf.iter_mut() {
                     *b = ((*b as u32 * 100) / 272 + 32) as u8;
                 }
             }
-            self.blk.write(sector, &outdata);
+            self.blk.map(|blk| blk.write(sector, &outdata));
             sector += 1;
             len -= curlen;
         }
@@ -59,7 +58,7 @@ impl<'b> Shell<'b> {
             .unwrap_or(512);
         let mut data: [u8; 512] = [0; 512];
         loop {
-            self.blk.read(sector, &mut data);
+            self.blk.map(|blk| blk.read(sector, &mut data));
             if len > 512 {
                 f(&data);
                 len -= 512;
@@ -100,8 +99,14 @@ impl<'b> Shell<'b> {
         }
     }*/
 
-    pub fn do_line<F>(&mut self, line: &[u8], mut f: F) -> bool where F: FnMut(&[u8]) {
-        let line = line.split(|c| *c == b'\n' || *c == b'\r').next().unwrap_or(&[]);
+    pub fn do_line<F>(&mut self, line: &[u8], mut f: F) -> bool
+    where
+        F: FnMut(&[u8]),
+    {
+        let line = line
+            .split(|c| *c == b'\n' || *c == b'\r')
+            .next()
+            .unwrap_or(&[]);
         let mut words = line.split(|c| *c == b' ');
         match words.next() {
             Some(b"rand") => {
@@ -116,14 +121,6 @@ impl<'b> Shell<'b> {
             /*Some(b"write") => {
                 self.write(&mut words, f);
             }*/
-            Some(b"netshell") => {
-                self.net.take().as_mut().map(|vnet| {
-                    let mut net = super::net::Net {
-                        net: vnet,
-                    };
-                    net.run(self);
-                });
-            }
             Some(b"exit") => {
                 return true;
             }
@@ -137,16 +134,16 @@ impl<'b> Shell<'b> {
     }
 }
 
-pub fn main(uart: &mut UART, app: &mut Shell) {
+pub fn main(uart: &Mutex<Option<UART>>, app: &mut Shell) {
     loop {
-        let _ = write!(uart, "$> ");
+        uart.map(|u| u.write_bytes(b"$> "));
         let mut buf = [0; 1024];
-        let line = uart.read_line(&mut buf, true);
+        let line = uart.map(|u| u.read_line(&mut buf, true)).unwrap_or(b"");
         if app.do_line(line, |output| {
-            uart.write_bytes(output);
+            uart.map(|u| u.write_bytes(output));
         }) {
             break;
         }
-        uart.write_byte(b'\n');
+        uart.map(|u| u.write_byte(b'\n'));
     }
 }
