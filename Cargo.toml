@@ -5,7 +5,7 @@ authors = ["Amit Aryeh Levy <amit@amitlevy.com>"]
 edition = "2018"
 
 [dependencies]
-linked_list_allocator = "0.8.11"
+linked_list_allocator = "0.10"
 
 [profile.release]
 debug = true

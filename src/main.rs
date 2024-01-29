@@ -1,6 +1,7 @@
 #![no_main]
 #![no_std]
-#![feature(asm, alloc_error_handler, global_asm)]
+
+use core::arch::{asm, global_asm};
 
 extern crate alloc;
 use alloc::boxed::Box;
@@ -99,7 +100,7 @@ pub extern "C" fn kernel_main(dtb: &device_tree::DeviceTree) {
                 unsafe {
                     let heap_start = &HEAP_START as *const _ as usize;
                     if heap_start >= addr {
-                        ALLOCATOR.lock().init(heap_start, size);
+                        ALLOCATOR.lock().init(heap_start as *mut u8, size);
                         break;
                     } else {
                         panic!("{:#x} {:#x}", addr, heap_start);
@@ -217,7 +218,7 @@ fn panic(panic_info: &PanicInfo<'_>) -> ! {
     unsafe { system_off() }
 }
 
-#[alloc_error_handler]
+/*#[alloc_error_handler]
 fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
     panic!("allocation error: {:?}", layout)
-}
+}*/

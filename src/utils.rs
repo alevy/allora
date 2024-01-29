@@ -1,3 +1,4 @@
+use core::arch::asm;
 use core::fmt;
 
 pub trait HasEndianness: Eq + PartialEq + Copy + Clone + Default {
